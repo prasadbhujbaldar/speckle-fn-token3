@@ -2,7 +2,9 @@ import json
 import sys
 from collections import Counter
 
+import os
 import requests
+os.environ["SPECKLEPY_DISABLE_ANALYTICS"] = "true"
 from specklepy.api.client import SpeckleClient
 from specklepy.transports.server import ServerTransport
 from specklepy.api import operations
@@ -85,6 +87,8 @@ def run(input_path):
     token = data["speckleToken"]
     run_data = data["automationRunData"]
     server_url = run_data["speckleServerUrl"]
+    # Docker containers can't reach localhost - remap to host
+    server_url = server_url.replace("localhost", "host.docker.internal").replace("127.0.0.1", "host.docker.internal")
     project_id = run_data["projectId"]
     function_run_id = run_data["functionRunId"]
     trigger = run_data["triggers"][0]
