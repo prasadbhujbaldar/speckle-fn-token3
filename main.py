@@ -1,18 +1,28 @@
 import json
 import sys
+import os
 from collections import Counter
 
-import os
 import requests
-os.environ["SPECKLEPY_DISABLE_ANALYTICS"] = "true"
 from specklepy.api.client import SpeckleClient
 from specklepy.transports.server import ServerTransport
 from specklepy.api import operations
 
+os.environ["SPECKLEPY_DISABLE_ANALYTICS"] = "true"
 
 REPORT_MUTATION = """
 mutation Report($input: AutomateFunctionRunStatusReportInput!) {
   automateFunctionRunStatusReport(input: $input)
+}
+"""
+
+VERSION_QUERY = """
+query GetVersion($projectId: String!, $versionId: String!) {
+  project(id: $projectId) {
+    version(id: $versionId) {
+      referencedObject
+    }
+  }
 }
 """
 
@@ -21,17 +31,7 @@ def report(server_url, token, project_id, function_run_id, status, message=None)
     try:
         res = requests.post(
             f"{server_url}/graphql",
-            json={
-                "query": REPORT_MUTATION,
-                "variables": {
-                    "input": {
-                        "projectId": project_id,
-                        "functionRunId": function_run_id,
-                        "status": status,
-                        "statusMessage": message,
-                    }
-                },
-            },
+            json={"query": REPORT_MUTATION, "variables": {"input": {"projectId": project_id, "functionRunId": function_run_id, "status": status, "statusMessage": message}}},
             headers={"Authorization": f"Bearer {token}", "apollographql-client-name": "automate-function"},
             timeout=30,
         )
@@ -45,10 +45,8 @@ def report(server_url, token, project_id, function_run_id, status, message=None)
 
 
 def get_speckle_type(obj):
-    speckle_type = getattr(obj, "speckle_type", None)
-    if speckle_type:
-        return speckle_type.split(".")[-1]
-    return "Unknown"
+    t = getattr(obj, "speckle_type", None)
+    return t.split(".")[-1] if t else "Unknown"
 
 
 def walk_objects(obj, counter, visited):
@@ -57,13 +55,10 @@ def walk_objects(obj, counter, visited):
         if obj_id in visited:
             return
         visited.add(obj_id)
-
-    speckle_type = getattr(obj, "speckle_type", None)
-    if speckle_type and speckle_type != "Base":
+    t = getattr(obj, "speckle_type", None)
+    if t and t != "Base":
         counter[get_speckle_type(obj)] += 1
-
-    member_names = getattr(obj, "get_member_names", lambda: [])()
-    for name in member_names:
+    for name in getattr(obj, "get_member_names", lambda: [])():
         try:
             value = getattr(obj, name)
         except Exception:
@@ -87,7 +82,6 @@ def run(input_path):
     token = data["speckleToken"]
     run_data = data["automationRunData"]
     server_url = run_data["speckleServerUrl"]
-    # Docker containers can't reach localhost - remap to host
     server_url = server_url.replace("localhost", "host.docker.internal").replace("127.0.0.1", "host.docker.internal")
     project_id = run_data["projectId"]
     function_run_id = run_data["functionRunId"]
@@ -95,15 +89,23 @@ def run(input_path):
     version_id = trigger["payload"]["versionId"]
     model_id = trigger["payload"]["modelId"]
 
-    print(f"[function] project={project_id} model={model_id} version={version_id}")
+    print(f"[function] project={project_id} model={model_id} version={version_id} server={server_url}")
     report(server_url, token, project_id, function_run_id, "RUNNING", "Fetching model data")
 
     try:
-        client = SpeckleClient(host=server_url, use_ssl=server_url.startswith("https"))
-        client.authenticate_with_token(token)
+        # Get referencedObject via GraphQL
+        res = requests.post(
+            f"{server_url}/graphql",
+            json={"query": VERSION_QUERY, "variables": {"projectId": project_id, "versionId": version_id}},
+            headers={"Authorization": f"Bearer {token}", "apollographql-client-name": "automate-function"},
+            timeout=30,
+        )
+        gql_data = res.json()
+        referenced_object_id = gql_data["data"]["project"]["version"]["referencedObject"]
+        print(f"[function] referencedObject={referenced_object_id}")
 
-        commit = client.commit.get(project_id, version_id)
-        referenced_object_id = commit.referencedObject
+        client = SpeckleClient(host=server_url, use_ssl=False)
+        client.authenticate_with_token(token)
 
         transport = ServerTransport(client=client, stream_id=project_id)
         root_object = operations.receive(referenced_object_id, transport)
@@ -114,7 +116,7 @@ def run(input_path):
 
         total = sum(counter.values())
         if total == 0:
-            summary = "No categorized elements found in this version."
+            summary = "No categorized elements found."
         else:
             top = ", ".join(f"{n}: {c}" for n, c in counter.most_common(10))
             summary = f"Found {total} elements across {len(counter)} categories. {top}"
