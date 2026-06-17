@@ -15,8 +15,7 @@ mutation Report($input: AutomateFunctionRunStatusReportInput!) {
 """
 
 
-def report(server_url: str, token: str, project_id: str, function_run_id: str, status: str, message: str = None):
-    """Report run status back to Speckle via the GraphQL API."""
+def report(server_url, token, project_id, function_run_id, status, message=None):
     try:
         res = requests.post(
             f"{server_url}/graphql",
@@ -31,28 +30,26 @@ def report(server_url: str, token: str, project_id: str, function_run_id: str, s
                     }
                 },
             },
-            headers={"Authorization": f"Bearer {token}"},
+            headers={"Authorization": f"Bearer {token}", "apollographql-client-name": "automate-function"},
             timeout=30,
         )
         data = res.json()
         if "errors" in data:
-            print(f"[function] GraphQL errors reporting status: {data['errors']}")
+            print(f"[function] GraphQL errors: {data['errors']}")
         else:
             print(f"[function] Reported status={status}")
     except Exception as e:
         print(f"[function] Failed to report status: {e}")
 
 
-def get_speckle_type(obj) -> str:
-    """Best-effort category extraction from a Speckle object."""
+def get_speckle_type(obj):
     speckle_type = getattr(obj, "speckle_type", None)
     if speckle_type:
         return speckle_type.split(".")[-1]
     return "Unknown"
 
 
-def walk_objects(obj, counter: Counter, visited: set):
-    """Recursively walk a Speckle object tree and count categories."""
+def walk_objects(obj, counter, visited):
     obj_id = getattr(obj, "id", None)
     if obj_id is not None:
         if obj_id in visited:
@@ -69,7 +66,6 @@ def walk_objects(obj, counter: Counter, visited: set):
             value = getattr(obj, name)
         except Exception:
             continue
-
         if hasattr(value, "speckle_type"):
             walk_objects(value, counter, visited)
         elif isinstance(value, (list, tuple)):
@@ -82,7 +78,7 @@ def walk_objects(obj, counter: Counter, visited: set):
                     walk_objects(item, counter, visited)
 
 
-def run(input_path: str):
+def run(input_path):
     with open(input_path) as f:
         data = json.load(f)
 
@@ -108,29 +104,27 @@ def run(input_path: str):
         transport = ServerTransport(client=client, stream_id=project_id)
         root_object = operations.receive(referenced_object_id, transport)
 
-        counter: Counter = Counter()
-        visited: set = set()
+        counter = Counter()
+        visited = set()
         walk_objects(root_object, counter, visited)
 
         total = sum(counter.values())
         if total == 0:
             summary = "No categorized elements found in this version."
         else:
-            top_categories = ", ".join(
-                f"{name}: {count}" for name, count in counter.most_common(10)
-            )
-            summary = f"Found {total} elements across {len(counter)} categories. {top_categories}"
+            top = ", ".join(f"{n}: {c}" for n, c in counter.most_common(10))
+            summary = f"Found {total} elements across {len(counter)} categories. {top}"
 
         print(f"[function] {summary}")
         report(server_url, token, project_id, function_run_id, "SUCCEEDED", summary)
 
     except Exception as e:
-        error_message = f"Function failed: {e}"
-        print(f"[function] {error_message}")
-        report(server_url, token, project_id, function_run_id, "FAILED", error_message)
+        msg = f"Function failed: {e}"
+        print(f"[function] {msg}")
+        report(server_url, token, project_id, function_run_id, "FAILED", msg)
         sys.exit(1)
 
 
 if __name__ == "__main__":
-    input_file = sys.argv[2] if len(sys.argv) > 2 else "/tmp/input.json"
+    input_file = sys.argv[1] if len(sys.argv) > 1 else "/tmp/input.json"
     run(input_file)
